@@ -9,7 +9,8 @@ final class PhaseMappingTests: XCTestCase {
     }
 
     func testClockHandPhaseDriverMapping() {
-        let driver = ClockHandPhaseDriver(period: 20, referenceDate: Date(timeIntervalSince1970: 0))
+        let driver = ClockHandPhaseDriver(period: 20, timeZone: TimeZone(secondsFromGMT: 0)!)
+        XCTAssertEqual(driver.phase(at: Date(timeIntervalSince1970: 0)), 0, accuracy: 0.000_001)
         XCTAssertEqual(driver.phase(at: Date(timeIntervalSince1970: 5)), 0.25, accuracy: 0.000_001)
         XCTAssertEqual(driver.radians(at: Date(timeIntervalSince1970: 10)), .pi, accuracy: 0.000_001)
     }

@@ -1,9 +1,6 @@
 import SwiftUI
 import Foundation
-import Combine
-#if os(iOS) || os(tvOS)
-import QuartzCore
-#endif
+@preconcurrency import ClockHandRotationKit
 
 public enum ClockHandRotationDirection: Sendable {
     case clockwise
@@ -19,30 +16,44 @@ public enum ClockHandRotationDirection: Sendable {
     }
 }
 
-public struct ClockHandPhaseDriver: Sendable, Equatable {
-    public var period: TimeInterval
-    public var referenceDate: Date
+/// Clock-hand phase model driven by `ClockHandRotationKit` periods.
+public struct ClockHandPhaseDriver: Equatable {
+    public var clockPeriod: ClockHandRotationPeriod
     public var phaseOffset: Double
     public var direction: ClockHandRotationDirection
+    public var timeZone: TimeZone
 
     public init(
         period: TimeInterval,
-        referenceDate: Date = .init(timeIntervalSince1970: 0),
         phaseOffset: Double = 0,
-        direction: ClockHandRotationDirection = .clockwise
+        direction: ClockHandRotationDirection = .clockwise,
+        timeZone: TimeZone = .current
     ) {
-        self.period = max(period, 0.000_001)
-        self.referenceDate = referenceDate
+        self.clockPeriod = .custom(abs(period))
         self.phaseOffset = phaseOffset
         self.direction = direction
+        self.timeZone = timeZone
     }
 
+    public init(
+        clockPeriod: ClockHandRotationPeriod,
+        phaseOffset: Double = 0,
+        direction: ClockHandRotationDirection = .clockwise,
+        timeZone: TimeZone = .current
+    ) {
+        self.clockPeriod = clockPeriod
+        self.phaseOffset = phaseOffset
+        self.direction = direction
+        self.timeZone = timeZone
+    }
+
+    /// Returns a wrapped phase in `[0, 1)` for a given date.
     public func phase(at date: Date = Date()) -> Double {
-        let elapsed = date.timeIntervalSince(referenceDate)
-        let raw = (elapsed / period) * direction.sign + phaseOffset
-        return Self.wrapPhase(raw)
+        let base = Self.basePhase(for: date, period: clockPeriod, timeZone: timeZone)
+        return Self.wrapPhase(base * direction.sign + phaseOffset)
     }
 
+    /// Returns radians in `[0, 2π)` for a given date.
     public func radians(at date: Date = Date()) -> Double {
         Self.radians(for: phase(at: date))
     }
@@ -55,9 +66,38 @@ public struct ClockHandPhaseDriver: Sendable, Equatable {
     public static func radians(for phase: Double) -> Double {
         wrapPhase(phase) * 2 * .pi
     }
+
+    private static func basePhase(for date: Date, period: ClockHandRotationPeriod, timeZone: TimeZone) -> Double {
+        switch period {
+        case let .custom(duration):
+            let safe = max(abs(duration), 0.000_001)
+            return wrapPhase(date.timeIntervalSince1970 / safe)
+        case .secondHand:
+            let calendar = Calendar(identifier: .gregorian)
+            let components = calendar.dateComponents(in: timeZone, from: date)
+            let second = Double(components.second ?? 0)
+            let nanosecond = Double(components.nanosecond ?? 0)
+            return wrapPhase((second + nanosecond / 1_000_000_000) / 60)
+        case .minuteHand:
+            let calendar = Calendar(identifier: .gregorian)
+            let components = calendar.dateComponents(in: timeZone, from: date)
+            let minute = Double(components.minute ?? 0)
+            let second = Double(components.second ?? 0)
+            return wrapPhase((minute + second / 60) / 60)
+        case .hourHand:
+            let calendar = Calendar(identifier: .gregorian)
+            let components = calendar.dateComponents(in: timeZone, from: date)
+            let hour = Double((components.hour ?? 0) % 12)
+            let minute = Double(components.minute ?? 0)
+            return wrapPhase((hour + minute / 60) / 12)
+        @unknown default:
+            return wrapPhase(date.timeIntervalSince1970 / 60)
+        }
+    }
 }
 
-public enum WidgetPhaseFallbackStrategy: Sendable, Equatable {
+/// WidgetKit snapshots are not rendered continuously.
+public enum WidgetPhaseFallbackStrategy: Equatable {
     case fixed(phase: Double)
     case sampled(every: TimeInterval)
     case entriesPerCycle(Int)
@@ -71,7 +111,7 @@ public enum WidgetPhaseFallbackStrategy: Sendable, Equatable {
             return driver.phase(at: snapped)
         case let .entriesPerCycle(count):
             let safeCount = max(count, 1)
-            let interval = max(driver.period / Double(safeCount), 0.001)
+            let interval = max(driver.periodDuration / Double(safeCount), 0.001)
             let snapped = snap(date: date, interval: interval)
             return driver.phase(at: snapped)
         }
@@ -89,7 +129,7 @@ public enum WidgetPhaseFallbackStrategy: Sendable, Equatable {
             return sampledDates(from: startDate, horizon: horizon, interval: interval)
         case let .entriesPerCycle(count):
             let safeCount = max(count, 1)
-            let interval = max(driver.period / Double(safeCount), 0.001)
+            let interval = max(driver.periodDuration / Double(safeCount), 0.001)
             return sampledDates(from: startDate, horizon: horizon, interval: interval)
         }
     }
@@ -120,127 +160,40 @@ public enum WidgetPhaseFallbackStrategy: Sendable, Equatable {
     }
 }
 
-@MainActor
-public final class ClockHandPhaseTicker: ObservableObject {
-    public enum UpdateMode: Sendable, Equatable {
-        case displayLink
-        case timer(hz: Double)
-    }
-
-    @Published public private(set) var phase: Double
-    @Published public private(set) var radians: Double
-
-    public let driver: ClockHandPhaseDriver
-    public let mode: UpdateMode
-
-    private let dateProvider: @Sendable () -> Date
-    private var timer: Timer?
-#if os(iOS) || os(tvOS)
-    private var displayLink: CADisplayLink?
-    private var displayLinkProxy: DisplayLinkProxy?
-#endif
-
-    public init(
-        driver: ClockHandPhaseDriver,
-        mode: UpdateMode = .displayLink,
-        dateProvider: @escaping @Sendable () -> Date = { Date() }
-    ) {
-        self.driver = driver
-        self.mode = mode
-        self.dateProvider = dateProvider
-
-        let now = dateProvider()
-        self.phase = driver.phase(at: now)
-        self.radians = driver.radians(at: now)
-    }
-
-    deinit {
-        timer?.invalidate()
-#if os(iOS) || os(tvOS)
-        displayLink?.invalidate()
-#endif
-    }
-
-    public func start() {
-        stop()
-        tick()
-
-        switch mode {
-        case .displayLink:
-#if os(iOS) || os(tvOS)
-            let proxy = DisplayLinkProxy(owner: self)
-            let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick))
-            link.add(to: .main, forMode: .common)
-            displayLinkProxy = proxy
-            displayLink = link
-#else
-            startTimer(hz: 60)
-#endif
-        case let .timer(hz):
-            startTimer(hz: hz)
-        }
-    }
-
-    public func stop() {
-        timer?.invalidate()
-        timer = nil
-#if os(iOS) || os(tvOS)
-        displayLink?.invalidate()
-        displayLink = nil
-        displayLinkProxy = nil
-#endif
-    }
-
-    public func tick() {
-        let now = dateProvider()
-        phase = driver.phase(at: now)
-        radians = driver.radians(at: now)
-    }
-
-    private func startTimer(hz: Double) {
-        let interval = 1.0 / max(hz, 1)
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                self.tick()
-            }
-        }
-
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-    }
-}
-
-#if os(iOS) || os(tvOS)
-@MainActor
-private final class DisplayLinkProxy: NSObject {
-    weak var owner: ClockHandPhaseTicker?
-
-    init(owner: ClockHandPhaseTicker) {
-        self.owner = owner
-    }
-
-    @objc
-    func tick() {
-        owner?.tick()
-    }
-}
-#endif
-
 public typealias PhaseClockDriver = ClockHandPhaseDriver
 public typealias PhaseClockDirection = ClockHandRotationDirection
 public typealias PhaseWidgetFallbackStrategy = WidgetPhaseFallbackStrategy
 
+private extension ClockHandPhaseDriver {
+    var periodDuration: TimeInterval {
+        switch clockPeriod {
+        case let .custom(duration):
+            return max(abs(duration), 0.000_001)
+        case .secondHand:
+            return 60
+        case .minuteHand:
+            return 3600
+        case .hourHand:
+            return 43_200
+        @unknown default:
+            return 60
+        }
+    }
+
+    var timelineInterval: TimeInterval {
+        max(periodDuration / 240, 1.0 / 60)
+    }
+}
+
 public struct PhaseClockView<Content: View>: View {
-    @StateObject private var ticker: ClockHandPhaseTicker
+    private let driver: ClockHandPhaseDriver
     private let content: (Double) -> Content
 
     public init(
         driver: ClockHandPhaseDriver,
-        mode: ClockHandPhaseTicker.UpdateMode = .displayLink,
         @ViewBuilder content: @escaping (Double) -> Content
     ) {
-        _ticker = StateObject(wrappedValue: ClockHandPhaseTicker(driver: driver, mode: mode))
+        self.driver = driver
         self.content = content
     }
 
@@ -248,21 +201,21 @@ public struct PhaseClockView<Content: View>: View {
         period: TimeInterval,
         phaseOffset: Double = 0,
         direction: ClockHandRotationDirection = .clockwise,
-        mode: ClockHandPhaseTicker.UpdateMode = .displayLink,
+        timeZone: TimeZone = .current,
         @ViewBuilder content: @escaping (Double) -> Content
     ) {
-        let driver = ClockHandPhaseDriver(period: period, phaseOffset: phaseOffset, direction: direction)
-        _ticker = StateObject(wrappedValue: ClockHandPhaseTicker(driver: driver, mode: mode))
+        self.driver = ClockHandPhaseDriver(
+            period: period,
+            phaseOffset: phaseOffset,
+            direction: direction,
+            timeZone: timeZone
+        )
         self.content = content
     }
 
     public var body: some View {
-        content(ticker.phase)
-            .onAppear {
-                ticker.start()
-            }
-            .onDisappear {
-                ticker.stop()
-            }
+        TimelineView(.animation(minimumInterval: driver.timelineInterval, paused: false)) { timeline in
+            content(driver.phase(at: timeline.date))
+        }
     }
 }

@@ -55,7 +55,5 @@ targets:
         SKIP_INSTALL: YES
         CODE_SIGN_STYLE: Automatic
     dependencies:
-      - package: PhaseDrivenAnimations
-        product: PhaseDrivenAnimations
       - package: ClockHandRotationKit
         product: ClockHandRotationKit
