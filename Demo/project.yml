@@ -1,0 +1,61 @@
+name: PhaseDrivenDemo
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+configs:
+  Debug: debug
+  Release: release
+packages:
+  PhaseDrivenAnimations:
+    path: ../
+  ClockHandRotationKit:
+    url: https://github.com/octree/ClockHandRotationKit
+    from: 1.0.0
+targets:
+  PhaseDrivenDemoApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App
+      - path: Shared
+    info:
+      path: App/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.PhaseDrivenDemo
+        PRODUCT_NAME: PhaseDrivenDemo
+        SWIFT_VERSION: 5.9
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+    dependencies:
+      - target: PhaseDrivenWidgetExtension
+        embed: true
+      - package: PhaseDrivenAnimations
+        product: PhaseDrivenAnimations
+
+  PhaseDrivenWidgetExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Widget
+      - path: Shared
+    info:
+      path: Widget/Info.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.PhaseDrivenDemo.widget
+        PRODUCT_NAME: PhaseDrivenWidgetExtension
+        SWIFT_VERSION: 5.9
+        SKIP_INSTALL: YES
+        CODE_SIGN_STYLE: Automatic
+    dependencies:
+      - package: PhaseDrivenAnimations
+        product: PhaseDrivenAnimations
+      - package: ClockHandRotationKit
+        product: ClockHandRotationKit
